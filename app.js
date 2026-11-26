@@ -6,6 +6,8 @@ const Review = require("./models/review.js");
 const path = require("path");
 const methodOverride = require("method-override");
 const ejsMate = require("ejs-mate");
+const session = require("express-session");
+const flash = require("connect-flash");
 const { listingSchema } = require("./schema.js");
 
 const MONGO_URL = "mongodb://127.0.0.1:27017/wanderlust";
@@ -37,7 +39,6 @@ function wrapAsync(fn) {
     };
 }
 
-// Validates form data with Joi before it reaches the database
 function validateListing(req, res, next) {
     const { error } = listingSchema.validate(req.body);
     if (error) {
@@ -45,6 +46,28 @@ function validateListing(req, res, next) {
         throw new ExpressError(400, msg);
     }
     next();
+}
+
+// Flash helpers: build Bootstrap alert HTML (messages are escaped)
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function buildAlerts(messages, type) {
+    return messages
+        .map(
+            (msg) => `
+<div class="alert alert-${type} alert-dismissible fade show" role="alert">
+    ${escapeHtml(msg)}
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+</div>`
+        )
+        .join("");
 }
 
 // ===============================
@@ -56,10 +79,32 @@ app.set("views", path.join(__dirname, "views"));
 app.use(express.static(path.join(__dirname, "/public")));
 
 // ===============================
-// Middleware
+// Middleware (order matters: session -> flash -> locals -> routes)
 // ===============================
 app.use(express.urlencoded({ extended: true }));
 app.use(methodOverride("_method"));
+
+const sessionOptions = {
+    secret: "mysupersecretcode",
+    resave: false,
+    saveUninitialized: true,
+    cookie: {
+        expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        httpOnly: true,
+    },
+};
+
+app.use(session(sessionOptions));
+app.use(flash());
+
+// Makes `flashHtml` available in every EJS file
+app.use((req, res, next) => {
+    res.locals.flashHtml =
+        buildAlerts(req.flash("success"), "success") +
+        buildAlerts(req.flash("error"), "danger");
+    next();
+});
 
 // ===============================
 // Routes
@@ -81,13 +126,15 @@ app.get("/listings/new", (req, res) => {
 app.post("/listings", validateListing, wrapAsync(async (req, res) => {
     const listing = new Listing(req.body.listing);
     await listing.save();
+    req.flash("success", "New listing created!");
     res.redirect("/listings");
 }));
 
 app.get("/listings/:id", wrapAsync(async (req, res) => {
     const listing = await Listing.findById(req.params.id).populate("reviews");
     if (!listing) {
-        throw new ExpressError(404, "Listing not found.");
+        req.flash("error", "Listing you requested does not exist!");
+        return res.redirect("/listings");
     }
     res.render("listings/show.ejs", { listing });
 }));
@@ -95,7 +142,8 @@ app.get("/listings/:id", wrapAsync(async (req, res) => {
 app.get("/listings/:id/edit", wrapAsync(async (req, res) => {
     const listing = await Listing.findById(req.params.id);
     if (!listing) {
-        throw new ExpressError(404, "Listing not found.");
+        req.flash("error", "Listing you requested does not exist!");
+        return res.redirect("/listings");
     }
     res.render("listings/edit.ejs", { listing });
 }));
@@ -108,13 +156,16 @@ app.put("/listings/:id", validateListing, wrapAsync(async (req, res) => {
         { new: true, runValidators: true }
     );
     if (!updated) {
-        throw new ExpressError(404, "Listing not found.");
+        req.flash("error", "Listing you requested does not exist!");
+        return res.redirect("/listings");
     }
+    req.flash("success", "Listing updated!");
     res.redirect(`/listings/${id}`);
 }));
 
 app.delete("/listings/:id", wrapAsync(async (req, res) => {
     await Listing.findByIdAndDelete(req.params.id);
+    req.flash("success", "Listing deleted!");
     res.redirect("/listings");
 }));
 
@@ -122,7 +173,8 @@ app.delete("/listings/:id", wrapAsync(async (req, res) => {
 app.post("/listings/:id/reviews", wrapAsync(async (req, res) => {
     const listing = await Listing.findById(req.params.id);
     if (!listing) {
-        throw new ExpressError(404, "Listing not found.");
+        req.flash("error", "Listing you requested does not exist!");
+        return res.redirect("/listings");
     }
 
     const newReview = new Review(req.body.review);
@@ -131,6 +183,7 @@ app.post("/listings/:id/reviews", wrapAsync(async (req, res) => {
     await newReview.save();
     await listing.save();
 
+    req.flash("success", "New review added!");
     res.redirect(`/listings/${listing._id}`);
 }));
 
@@ -140,6 +193,7 @@ app.delete("/listings/:id/reviews/:reviewId", wrapAsync(async (req, res) => {
     await Listing.findByIdAndUpdate(id, { $pull: { reviews: reviewId } });
     await Review.findByIdAndDelete(reviewId);
 
+    req.flash("success", "Review deleted!");
     res.redirect(`/listings/${id}`);
 }));
 
@@ -190,5 +244,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(8080, () => {
-    console.log("Server is Listening to Port 8080");
+    console.log("Server is Listening to 8080");
 });
